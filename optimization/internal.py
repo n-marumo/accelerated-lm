@@ -1,153 +1,246 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
+import scipy.sparse.linalg as spslin
+import scipy.linalg as splin
+
+
+# min_x  f(x) + g(x),   where f(x) := h(c(x))
 
 
 class Oracle:
     def __init__(self, instance):
-        self.c = instance.inner_func
-        self.h = instance.outer_func
-        self.prox = instance.prox
-        self.h_min = instance.outer_min
-        self.h_grad = jax.grad(self.h)
-        self.h_func_grad = jax.value_and_grad(self.h)
+        self.gmin_plus_hmin = instance.gmin_plus_hmin
+
+        self.__g = instance.g
+        self.__g_prox = instance.g_prox
+        self.__h = instance.h
+        self.__c = instance.c
+
         self.xk = None
-        self.c_xk = None
-        self.c_jvp_xk = None
-        self.c_vjp_xk = None
+        self.__c_xk = None
+        self.__c_jvp_xk = None
+        self.__c_vjp_xk = None
 
-        self.count_coef = {
-            "obj_func": 1,
-            "obj_grad": 3,
-            "vjp_pre": 2,
-            "transpose": 0,
-            "jvp": 1,
-            "vjp": 1,
-        }
-        self.count = dict.fromkeys(self.count_coef.keys(), 0)
+        self.count = dict.fromkeys(
+            [
+                "g",
+                "g_prox",
+                "h",
+                "h_grad",
+                "h_value_and_grad",
+                "f",
+                "f_grad",
+                "f_value_and_grad",
+                "vjp_pre",
+                "transpose",
+                "jvp",
+                "vjp",
+            ],
+            0,
+        )
 
-    @property
-    def total_cost(self):
-        return sum([self.count_coef[k] * self.count[k] for k in self.count.keys()])
+    def reset_count(self):
+        self.count = dict.fromkeys(self.count.keys(), 0)
 
-    def __obj_func(self, x):
-        return self.h(self.c(x))
-
-    def obj_func(self, x, counted=True):
+    def g(self, x, counted=True):
         if counted:
-            self.count["obj_func"] += 1
-        return self.__obj_func(x)
+            self.count["g"] += 1
+        return self.__g(x)
 
-    def obj_grad(self, x):
-        self.count["obj_grad"] += 1
-        return jax.grad(self.__obj_func)(x)
+    def g_prox(self, x, eta, counted=True):
+        if counted:
+            self.count["g_prox"] += 1
+        return self.__g_prox(x, eta)
 
+    def h(self, x):
+        self.count["h"] += 1
+        return self.__h(x)
+
+    def h_grad(self, x):
+        self.count["h_grad"] += 1
+        return jax.grad(self.__h)(x)
+
+    def h_value_and_grad(self, x):
+        self.count["h_value_and_grad"] += 1
+        return jax.value_and_grad(self.__h)(x)
+
+    def __f(self, x):
+        return self.__h(self.__c(x))
+
+    def f(self, x, counted=True):
+        if counted:
+            self.count["f"] += 1
+        return self.__f(x)
+
+    def __f_grad(self, x):
+        return jax.grad(self.__f)(x)
+
+    def f_grad(self, x, counted=True):
+        if counted:
+            self.count["f_grad"] += 1
+        return self.__f_grad(x)
+
+    def f_value_and_grad(self, x, counted=True):
+        if counted:
+            self.count["f_value_and_grad"] += 1
+        return jax.value_and_grad(self.__f)(x)
+
+    def obj(self, x, counted=True):
+        return self.f(x, counted) + self.g(x, counted)
+
+    # update xk for Jacobian-vector products
     def update_xk(self, xk):
         self.count["vjp_pre"] += 1
         self.count["transpose"] += 1
         self.xk = xk
-        self.c_xk, _c_vjp_xk = jax.vjp(self.c, xk)
-        self.c_vjp_xk = lambda v: _c_vjp_xk(v)[0]
-        _c_jvp_xk = jax.linear_transpose(self.c_vjp_xk, self.c_xk)
-        self.c_jvp_xk = lambda u: _c_jvp_xk(u)[0]
+        self.__c_xk, _c_vjp_xk = jax.vjp(self.__c, xk)
+        self.__c_vjp_xk = lambda v: _c_vjp_xk(v)[0]
+        _c_jvp_xk = jax.linear_transpose(self.__c_vjp_xk, self.__c_xk)
+        self.__c_jvp_xk = lambda u: _c_jvp_xk(u)[0]
 
-    def gn_func(self, x):
+    # oracles for Gauss-Newton model
+    def gn(self, x):
         self.count["jvp"] += 1
-        return self.h(self.c_xk + self.c_jvp_xk(x - self.xk))
+        return self.h(self.__c_xk + self.__c_jvp_xk(x - self.xk))
 
     def gn_grad(self, x):
         self.count["jvp"] += 1
         self.count["vjp"] += 1
-        return self.c_vjp_xk(self.h_grad(self.c_xk + self.c_jvp_xk(x - self.xk)))
+        return self.__c_vjp_xk(self.h_grad(self.__c_xk + self.__c_jvp_xk(x - self.xk)))
 
-    def gn_func_grad(self, x):
+    def gn_value_and_grad(self, x):
         self.count["jvp"] += 1
         self.count["vjp"] += 1
         u = x - self.xk
-        h_y, h_grad_y = self.h_func_grad(self.c_xk + self.c_jvp_xk(u))
-        return h_y, self.c_vjp_xk(h_grad_y)
+        h_y, h_grad_y = self.h_value_and_grad(self.__c_xk + self.__c_jvp_xk(u))
+        return h_y, self.__c_vjp_xk(h_grad_y)
 
 
 class OracleSub:
     def __init__(self, oracle: Oracle, mu):
         self.oracle = oracle
         self.mu = mu
-        self.prox = oracle.prox
+        self.g = oracle.g
+        self.g_prox = oracle.g_prox
 
-    def func(self, x):
+    def f(self, x):
         u = x - self.oracle.xk
-        return self.oracle.gn_func(x) + self.mu / 2 * jnp.linalg.norm(u) ** 2
+        return self.oracle.gn(x) + self.mu / 2 * jnp.linalg.norm(u) ** 2
 
-    def grad(self, x):
+    def f_grad(self, x):
         u = x - self.oracle.xk
         return self.oracle.gn_grad(x) + self.mu * u
 
-    def func_grad(self, x):
+    def f_value_and_grad(self, x):
         u = x - self.oracle.xk
-        f, g = self.oracle.gn_func_grad(x)
-        return f + self.mu / 2 * jnp.linalg.norm(u) ** 2, g + self.mu * u
+        f, f_grad = self.oracle.gn_value_and_grad(x)
+        return f + self.mu / 2 * jnp.linalg.norm(u) ** 2, f_grad + self.mu * u
 
 
-# this is slower
-class OracleJVP:
-    def __init__(self, instance):
-        self.c = instance.inner_func
-        self.h = instance.outer_func
-        self.proj = instance.proj
-        self.h_min = instance.outer_min
-        self.h_grad = jax.grad(self.h)
-        self.h_func_grad = jax.value_and_grad(self.h)
-        self.xk = None
-        self.mu = None
-        self.c_xk = None
-        self.c_jvp_xk = None
-        self.c_vjp_xk = None
+class OracleSubABO2022:
+    def __init__(self, oracle: Oracle, B: spslin.LinearOperator, x, f_grad_x, Delta):
+        self.oracle = oracle
+        self.B = B
+        self.x = x
+        self.f_grad_x = f_grad_x
+        self.Delta = Delta
 
-        self.count_coef = {
-            "obj_func": 1,
-            "obj_grad": 3,
-            "linearize": 2,
-            "transpose": 1,
-            "jvp": 1,
-            "vjp": 1,
-        }
-        self.count = dict.fromkeys(self.count_coef.keys(), 0)
+    def f(self, s):
+        return jnp.vdot(self.f_grad_x, s) + jnp.vdot(self.B.dot(s), s) / 2
 
-    @property
-    def total_cost(self):
-        return sum([self.count_coef[k] * self.count[k] for k in self.count.keys()])
+    def f_grad(self, s):
+        return self.f_grad_x + self.B.dot(s)
 
-    def obj_func(self, x):
-        self.count["obj_func"] += 1
-        return self.h(self.c(x))
+    def f_value_and_grad(self, s):
+        Bs = self.B.dot(s)
+        return jnp.vdot(self.f_grad_x, s) + jnp.vdot(Bs, s) / 2, self.f_grad_x + Bs
 
-    def obj_grad(self, x):
-        self.count["obj_grad"] += 1
-        return jax.grad(self.obj_func)(x)
+    def g(self, s):
+        return self.oracle.g(self.x + s)
 
-    def update_xk(self, xk):
-        self.count["linearize"] += 1
-        self.count["transpose"] += 1
-        self.xk = xk
-        self.c_xk, self.c_jvp_xk = jax.linearize(self.c, xk)
-        self.c_vjp_xk = jax.linear_transpose(self.c_jvp_xk, xk)
+    # based on Section 5.1 of ABO2022 (the last equation on page 917)
+    def g_prox(self, q, nu):
+        return jnp.clip(
+            self.oracle.g_prox(q + self.x, nu) - self.x,
+            a_min=-self.Delta,
+            a_max=self.Delta,
+        )
 
-    def update_mu(self, mu):
-        self.mu = mu
 
-    def lm_func(self, x):
-        self.count["jvp"] += 1
-        u = x - self.xk
-        return self.h(self.c_xk + self.c_jvp_xk(u)) + self.mu / 2 * jnp.linalg.norm(u) ** 2
+# for quasi-Newton model
+# based on "Compact Representation of BFGS Updating" (p.181)
+# of https://doi.org/10.1007/978-0-387-40065-5
+class BFGSB:
+    def __init__(self, n, memory=5, min_curvature=1e-8):
+        self.n = n
+        self.m = memory
+        self.mc = min_curvature
+        self.d = np.zeros((0,))
+        self.S = np.zeros((n, 0))
+        self.STS = np.zeros((0, 0))
+        self.Y = np.zeros((n, 0))
+        self.L = np.zeros((0, 0))
+        self.A = None
+        self.lu_factor = None
+        self.empty = True
 
-    def lm_grad(self, x):
-        self.count["jvp"] += 1
-        self.count["vjp"] += 1
-        u = x - self.xk
-        return self.c_vjp_xk(self.h_grad(self.c_xk + self.c_jvp_xk(u)))[0] + self.mu * u
+    def update(self, s: np.array, y: np.array):
+        sy = s @ y
+        ss = s @ s
+        if sy <= self.mc * ss:
+            print("skip update")
+            return
+        self.delta = y @ y / sy
+        self.d = np.append(self.d, sy)
+        self.L = np.block([[self.L, np.zeros((self.L.shape[0], 1))], [s @ self.Y, 0]])
+        STs = self.S.T @ s
+        self.STS = np.block([[self.STS, STs.reshape((-1, 1))], [STs.reshape((1, -1)), ss]])
+        self.S = np.hstack((self.S, s.reshape((-1, 1))))
+        self.Y = np.hstack((self.Y, y.reshape((-1, 1))))
 
-    def lm_func_grad(self, x):
-        self.count["jvp"] += 1
-        self.count["vjp"] += 1
-        u = x - self.xk
-        h_y, h_grad_y = self.h_func_grad(self.c_xk + self.c_jvp_xk(u))
-        return h_y + self.mu / 2 * jnp.linalg.norm(u) ** 2, self.c_vjp_xk(h_grad_y)[0] + self.mu * u
+        if len(self.d) > self.m:
+            self.d = self.d[1:]
+            self.L = self.L[1:, 1:]
+            self.S = self.S[:, 1:]
+            self.STS = self.STS[1:, 1:]
+            self.Y = self.Y[:, 1:]
+
+        # Eq. (7.29)
+        self.A = np.hstack((self.delta * self.S, self.Y))
+        self.lu_factor = splin.lu_factor(
+            np.block(
+                [
+                    [self.delta * self.STS, self.L],
+                    [self.L.T, -np.diag(self.d)],
+                ]
+            )
+        )
+        self.empty = False
+
+    def dot(self, v: np.array):
+        if self.empty:
+            return np.zeros_like(v)
+        else:
+            return self.delta * v - self.A @ splin.lu_solve(self.lu_factor, self.A.T @ v)
+
+
+# r = 20
+# d = 3
+# A = np.random.randn(d, r)
+# A = A @ A.T
+
+# Bsp = spopt.BFGS()
+# Bsp.initialize(d, "hess")
+
+# B = BFGSB(d, memory=20)
+# for i in range(20):
+#     print(i)
+#     u = np.random.randn(d)
+#     B.update(u, A @ u)
+#     Bsp.update(u, A @ u)
+
+#     v = np.random.randn(d)
+#     print(B.dot(v))
+#     print(A @ v)
+#     print(Bsp.dot(v))

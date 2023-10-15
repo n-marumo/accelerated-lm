@@ -1,73 +1,115 @@
 import pandas as pd
 from . import method, internal
 import numpy as np
+import jax.numpy as jnp
 import pprint
+
+
+import time
+import os
+
+DIVERGENCE_RATIO = 1e5  # used for checking divergence
+STEP_GMN = 1e5  # GMN: gradient mapping norm
 
 
 class CompositeMinimization:
     algorithms = {
         "ourlm": method.OurLM,
         "pg": method.ProximalGradient,
-        "dl": method.DL2018,
         "dp": method.DP2019,
+        # "abo": method.ABO2022OLD,
+        "abo": method.ABO2022,
     }
 
-    def __init__(self, instance, alg_id, alg_param):
+    def __init__(self, instance):
         self.instance = instance
-        self.alg: method.Base = CompositeMinimization.algorithms[alg_id](**alg_param)
-
+        self.alg: method.Base = None
         self.oracle = internal.Oracle(instance)
-        self.has_test = hasattr(self.instance, "test")
+        self.elapsed_time = None
+        self.store_sols = None
+        self.results = None
+        self.sols = None
 
-        self.results = []
-        self.sols = []
+    def __calc_obj_gmn(self):
+        obj_gmn = []
+        for sol in self.alg.solutions:
+            f = None
+            f_grad = None
+            if "f" in sol:
+                f = sol["f"]
+            if "f_grad" in sol:
+                f_grad = sol["f_grad"]
+            if f_grad is None:
+                f, f_grad = self.oracle.f_value_and_grad(sol["sol"], False)
+            if f is None:
+                f = self.oracle.f(sol["sol"], False)
 
-    def __compute_result(self, tested):
+            g = None
+            if "g" in sol:
+                g = sol["g"]
+            if g is None:
+                g = self.oracle.g(sol["sol"], False)
+
+            obj_gmn.append(
+                (
+                    f + g,
+                    jnp.linalg.norm(sol["sol"] - self.oracle.g_prox(sol["sol"] - STEP_GMN * f_grad, STEP_GMN, False))
+                    / STEP_GMN,
+                )
+            )
+        return tuple(map(min, zip(*obj_gmn)))
+
+    def __store_print_result(self, obj, gmn, printed):
         result = {
             "iter": self.alg.iter,
-            "oracle_cost": self.oracle.total_cost,
-            "obj_value": self.alg.func_x,
-            "optimality": self.alg.optimality,
+            "elapsed_time": self.elapsed_time,
+            "obj": obj,
+            "gmn": gmn,
         }
-        if tested:
-            result |= self.instance.test(self.alg.x)
-        result |= self.alg.params
         result |= self.oracle.count
-        return pd.Series(result).to_frame().T
-
-    def __store_print_result(self, tested, printed, store_sols):
-        result = self.__compute_result(tested)
+        result |= self.alg.recorded_params
+        result = pd.Series(result).to_frame().T
         if printed:
-            # print(result.to_string(index=False, float_format=lambda x: "{:.3e}".format(x)))
             pprint.pprint(result.to_dict())
         self.results.append(result)
-        if store_sols:
-            self.sols.append(self.alg.x)
+        if self.store_sols:
+            self.sols.append(self.alg.solutions[0]["sol"])
 
     def solve(
         self,
+        alg_id,
+        alg_param={},
         max_iter=100,
-        max_oracle=100,
-        tol=1e-16,
-        test_interval=1,
+        timeout=20,
+        tol_obj=0,
+        tol_grad=0,
         print_interval=1,
         store_sols=False,
     ):
-        self.alg.initialize(self.oracle, self.instance.x0)
-        self.__store_print_result(self.has_test, True, store_sols)
+        self.store_sols = store_sols
+        self.elapsed_time = 0
+        self.oracle.reset_count()
+        self.results = []
+        self.sols = []
+        self.alg: method.Base = CompositeMinimization.algorithms[alg_id](alg_param, self.instance.x0, self.oracle)
+        obj, gmn = self.__calc_obj_gmn()
+        self.__store_print_result(obj, gmn, True)
+        obj_init = obj
+
         for iter in range(1, max_iter + 1):
+            start_time = time.perf_counter()
             self.alg.update(self.oracle)
-            self.__store_print_result(
-                iter % test_interval == 0 and self.has_test,
-                iter % print_interval == 0,
-                store_sols,
-            )
-            # if self.oracle.total_cost >= max_oracle or (self.alg.optimality is not None and self.alg.optimality <= tol):
-            if self.oracle.total_cost >= max_oracle or self.alg.func_x - self.oracle.h_min <= tol or self.alg.func_x >= np.inf:
+            end_time = time.perf_counter()
+            self.elapsed_time += end_time - start_time
+
+            obj, gmn = self.__calc_obj_gmn()
+            self.__store_print_result(obj, gmn, iter % print_interval == 0)
+            if obj / obj_init >= DIVERGENCE_RATIO or self.elapsed_time >= timeout or gmn <= tol_grad or obj <= tol_obj:
                 break
 
-    def save_result(self, filename):
+    def save_result(self, folder, filename):
+        os.makedirs(folder, exist_ok=True)
         df = pd.concat(self.results, ignore_index=True)
-        df.to_csv(f"{filename}.csv", index=False)
+        df.to_csv(f"{folder}/{filename}.csv", index=False)
         if self.sols:
-            np.savetxt(f"sols_{filename}.txt", self.sols)
+            np.savetxt(f"{folder}/sols_{filename}.txt", self.sols)

@@ -65,12 +65,14 @@ def get_data(train=True, train_size=0, random_state=0):
     images = jnp.array(data.train_data).reshape(len(data.train_data), -1) / SCALE_IMAGE
     labels = one_hot(np.array(data.train_labels), N_TARGETS)
     if train:
-        images, _, labels, _ = train_test_split(images, labels, stratify=labels, train_size=train_size, random_state=random_state)
+        images, _, labels, _ = train_test_split(
+            images, labels, stratify=labels, train_size=train_size, random_state=random_state
+        )
     return jnp.array(images), jnp.array(labels)
 
 
 class Problem:
-    outer_min = 0
+    gmin_plus_hmin = 0
 
     def __init__(self, activation, layer_size, train_size, seed=0):
         key = jax.random.PRNGKey(seed)
@@ -99,7 +101,9 @@ class Problem:
         print("Number of variables:", self.param_size_cumsum[-1])
 
     def unflatten(self, x):
-        return jax.tree_util.tree_unflatten(self.treedef, [p.reshape(s) for (s, p) in zip(self.param_shape, jnp.split(x, self.param_size_cumsum))])
+        return jax.tree_util.tree_unflatten(
+            self.treedef, [p.reshape(s) for (s, p) in zip(self.param_shape, jnp.split(x, self.param_size_cumsum))]
+        )
 
     def loss(self, z, labels):
         return -jnp.vdot(nn.log_softmax(z, axis=1), labels) / labels.shape[0]
@@ -108,23 +112,17 @@ class Problem:
         return self.model.apply(self.unflatten(x), images)
 
     @functools.partial(jax.jit, static_argnums=(0,))
-    def inner_func(self, x):
+    def c(self, x):
         return self.neural_net(x, self.images_train)
 
     @functools.partial(jax.jit, static_argnums=(0,))
-    def outer_func(self, z):
+    def h(self, z):
         return self.loss(z, self.labels_train)
 
     @functools.partial(jax.jit, static_argnums=(0,))
-    def prox(self, x, eta):
+    def g_prox(self, x, eta):
         return x
 
     @functools.partial(jax.jit, static_argnums=(0,))
-    def test(self, x):
-        output = self.neural_net(x, self.images_test)
-        predicted_class = jnp.argmax(output, axis=1)
-        target_class = jnp.argmax(self.labels_test, axis=1)
-        return {
-            "test_loss": self.loss(output, self.labels_test),
-            "test_accuracy": jnp.mean(predicted_class == target_class),
-        }
+    def g(self, x):
+        return 0

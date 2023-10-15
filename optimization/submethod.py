@@ -1,5 +1,4 @@
 import jax.numpy as jnp
-import scipy.optimize as spopt
 import numpy as np
 from . import internal
 
@@ -7,17 +6,6 @@ from . import internal
 class Base:
     def update_and_check(self, oracle: internal.OracleSub):
         return False
-
-
-class ScipyOpt(Base):
-    def __init__(self, x0, tol):
-        self.x = x0
-        self.tol = tol
-
-    def update_and_check(self, oracle: internal.OracleSub):
-        res = spopt.minimize(oracle.func, self.x, jac=oracle.grad, tol=self.tol)
-        self.x = res.x
-        return True
 
 
 # based on Algorithm 31 of [d’Aspremont, et al. (2021)]
@@ -37,19 +25,21 @@ class AcceleratedProximalGradient(Base):
         CHECK_INTERVAL = 10
         if self.iter % CHECK_INTERVAL != 0:
             return False
-        lhs = np.linalg.norm(oracle.grad(self.x) - grad_y - self.eta * (self.x - y))
+        lhs = np.linalg.norm(oracle.f_grad(self.x) - grad_y - self.eta * (self.x - y))
         rhs = self.tol_coef * self.mu * np.linalg.norm(self.x - self.x0)
         # print(k, eta, lhs, rhs)
         return lhs <= rhs
 
-    def update_and_check(self, oracle: internal.OracleSub):
+    def update_and_check(self, oracle: internal.OracleSub, obj_xk):
         while True:
-            b = (1 + 2 * self.eta * self.b + np.sqrt(1 + 4 * self.eta * self.b * (1 + self.mu * self.b))) / (2 * (self.eta - self.mu))
+            b = (1 + 2 * self.eta * self.b + np.sqrt(1 + 4 * self.eta * self.b * (1 + self.mu * self.b))) / (
+                2 * (self.eta - self.mu)
+            )
             tau = (b - self.b) * (1 + self.mu * self.b) / (b * (1 + self.mu * self.b) + self.mu * self.b * (b - self.b))
             y = self.x + tau * (self.z - self.x)
-            func_y, grad_y = oracle.func_grad(y)
-            x = oracle.prox(y - grad_y / self.eta, 1 / self.eta)
-            func_x = oracle.func(x)
+            func_y, grad_y = oracle.f_value_and_grad(y)
+            x = oracle.g_prox(y - grad_y / self.eta, 1 / self.eta)
+            func_x = oracle.f(x)
             u = x - y
 
             if func_x <= func_y + jnp.vdot(grad_y, u) + self.eta / 2 * jnp.linalg.norm(u) ** 2:
@@ -60,14 +50,15 @@ class AcceleratedProximalGradient(Base):
 
         if jnp.vdot(x - self.x, u) < 0:
             print(f"Bad direction: {self.iter}")
-            # k_restart += 1
-            # continue
 
         self.x = x
         self.iter += 1
 
+        # if func_x + oracle.g(self.x) > obj_xk:
+        #     True
         if self.check(oracle, y, grad_y):
             return True
+
         phi = (b - self.b) / (1 + self.mu * b)
         self.z = (1 - self.mu * phi) * self.z + self.mu * phi * y + self.eta * phi * (x - y)
         self.b = b
@@ -92,15 +83,19 @@ class AcceleratedProximalGradient2(Base):
         return self.iter >= self.iter_num
 
     def update_and_check(self, oracle: internal.OracleSub):
-        a = (1 + self.alpha * self.theta + np.sqrt((1 + self.alpha * self.theta) * (1 + (self.alpha + 2 * self.Lf) * self.theta))) / self.Lf
+        a = (
+            1
+            + self.alpha * self.theta
+            + np.sqrt((1 + self.alpha * self.theta) * (1 + (self.alpha + 2 * self.Lf) * self.theta))
+        ) / self.Lf
         theta = self.theta + a
-        v = oracle.prox(self.z, self.theta / self.c)
+        v = oracle.g_prox(self.z, self.theta / self.c)
         y = (self.theta * self.x + a * v) / theta
-        self.x = oracle.prox(y - 1 / self.Lf * oracle.grad(y), 1 / self.Lf)
+        self.x = oracle.g_prox(y - 1 / self.Lf * oracle.f_grad(y), 1 / self.Lf)
         self.iter += 1
         if self.check():
             return True
-        self.z = (self.c * self.z + a * (self.alpha * self.x0 - oracle.grad(self.x))) / (self.c + a * self.alpha)
+        self.z = (self.c * self.z + a * (self.alpha * self.x0 - oracle.f_grad(self.x))) / (self.c + a * self.alpha)
         self.c += a * self.alpha
         self.theta = theta
         return False

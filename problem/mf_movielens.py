@@ -32,7 +32,7 @@ def train_test_u1():
 
 
 class Problem:
-    outer_min = 0
+    gmin_plus_hmin = 0
 
     def __init__(self, nonneg, train_frac, dim_feature, regularization, sigma_init, seed=0):
         key = jax.random.PRNGKey(seed)
@@ -52,8 +52,8 @@ class Problem:
 
         key, *subkeys = jax.random.split(key, num=3)
         params = [
-            jax.random.normal(subkeys[0], (num_user, dim_feature)) * sigma_init,
-            jax.random.normal(subkeys[1], (num_item, dim_feature)) * sigma_init,
+            jax.random.uniform(subkeys[0], (num_user, dim_feature)) * sigma_init,
+            jax.random.uniform(subkeys[1], (num_item, dim_feature)) * sigma_init,
         ]
         self.param_shape = [p.shape for p in params]
         self.param_size_cumsum = np.cumsum([p.size for p in params])
@@ -67,27 +67,23 @@ class Problem:
         return jnp.mean(jnp.square(z))
 
     @functools.partial(jax.jit, static_argnums=(0,))
-    def inner_func(self, x):
+    def c(self, x):
         u, v = self.unflatten(x)
         rows, cols = self.data_train["indices"]
         z = (u @ v.T)[(rows, cols)] - self.data_train["values"]
         return jnp.concatenate((z, u.reshape(-1), v.reshape(-1)))
 
     @functools.partial(jax.jit, static_argnums=(0,))
-    def outer_func(self, z):
+    def h(self, z):
         z0, z1 = jnp.split(z, [self.n_train])
         return self.loss(z0) + self.regularization * (jnp.sum(jnp.square(z1)))
 
     @functools.partial(jax.jit, static_argnums=(0,))
-    def prox(self, x, eta):
+    def g_prox(self, x, eta):
         if self.nonneg:
             return jnp.maximum(x, 0)
         else:
             return x
 
-    @functools.partial(jax.jit, static_argnums=(0,))
-    def test(self, x):
-        u, v = self.unflatten(x)
-        rows, cols = self.data_test["indices"]
-        mse = self.loss((u @ v.T)[(rows, cols)] - self.data_test["values"])
-        return {"test_rmse": jnp.sqrt(mse)}
+    def g(self, x):
+        return 0

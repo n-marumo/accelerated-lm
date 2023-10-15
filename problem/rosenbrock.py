@@ -1,8 +1,12 @@
+import jax
 import jax.numpy as jnp
 
 
+jax.config.update("jax_enable_x64", True)
+
+
 class Problem:
-    outer_min = 0
+    gmin_plus_hmin = 0
 
     def __init__(self, a, b, d, x0):
         self.a = a
@@ -10,11 +14,14 @@ class Problem:
         self.d = d
         self.x0 = jnp.ones(d) * x0
 
-    def inner_func(self, x):
+    def c(self, x):
         return jnp.concatenate((self.a - x[:-1], jnp.sqrt(self.b) * (x[1:] - x[:-1] ** 2))) * jnp.sqrt(2)
 
-    def outer_func(self, r):
+    def h(self, r):
         return jnp.linalg.norm(r) ** 2 / 2
 
-    def prox(self, x, eta):
+    def g(self, x):
+        return 0
+
+    def g_prox(self, x, eta):
         return x
