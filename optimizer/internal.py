@@ -18,9 +18,10 @@ class Oracle:
         self.__c = instance.c
 
         self.xk = None
-        self.__c_xk = None
+        self.c_xk = None
         self.__c_jvp_xk = None
         self.__c_vjp_xk = None
+        self.__hess_h_cxk = None
 
         self.count = dict.fromkeys(
             [
@@ -29,13 +30,15 @@ class Oracle:
                 "h",
                 "h_grad",
                 "h_value_and_grad",
+                "h_hvp_pre",
+                "h_hvp",
                 "f",
                 "f_grad",
                 "f_value_and_grad",
-                "vjp_pre",
+                "c_vjp_pre",
                 "transpose",
-                "jvp",
-                "vjp",
+                "c_jvp",
+                "c_vjp",
             ],
             0,
         )
@@ -57,13 +60,24 @@ class Oracle:
         self.count["h"] += 1
         return self.__h(x)
 
+    def __h_grad(self, x):
+        return jax.grad(self.__h)(x)
+
     def h_grad(self, x):
         self.count["h_grad"] += 1
-        return jax.grad(self.__h)(x)
+        return self.__h_grad(x)
 
     def h_value_and_grad(self, x):
         self.count["h_value_and_grad"] += 1
         return jax.value_and_grad(self.__h)(x)
+
+    def c_jvp_xk(self, u):
+        self.count["c_jvp"] += 1
+        return self.__c_jvp_xk(u)
+
+    def c_vjp_xk(self, v):
+        self.count["c_vjp"] += 1
+        return self.__c_vjp_xk(v)
 
     def __f(self, x):
         return self.__h(self.__c(x))
@@ -90,31 +104,35 @@ class Oracle:
         return self.f(x, counted) + self.g(x, counted)
 
     # update xk for Jacobian-vector products
-    def update_xk(self, xk):
-        self.count["vjp_pre"] += 1
+    def update_xk(self, xk, ABOGN=False):
+        self.count["c_vjp_pre"] += 1
         self.count["transpose"] += 1
         self.xk = xk
-        self.__c_xk, _c_vjp_xk = jax.vjp(self.__c, xk)
+        self.c_xk, _c_vjp_xk = jax.vjp(self.__c, xk)
         self.__c_vjp_xk = lambda v: _c_vjp_xk(v)[0]
-        _c_jvp_xk = jax.linear_transpose(self.__c_vjp_xk, self.__c_xk)
+        _c_jvp_xk = jax.linear_transpose(self.__c_vjp_xk, self.c_xk)
         self.__c_jvp_xk = lambda u: _c_jvp_xk(u)[0]
+        if ABOGN:
+            self.count["h_hvp_pre"] += 1
+            _, self.__hess_h_cxk = jax.linearize(self.__h_grad, self.c_xk)
 
     # oracles for Gauss-Newton model
     def gn(self, x):
-        self.count["jvp"] += 1
-        return self.h(self.__c_xk + self.__c_jvp_xk(x - self.xk))
+        return self.h(self.c_xk + self.c_jvp_xk(x - self.xk))
 
     def gn_grad(self, x):
-        self.count["jvp"] += 1
-        self.count["vjp"] += 1
-        return self.__c_vjp_xk(self.h_grad(self.__c_xk + self.__c_jvp_xk(x - self.xk)))
+        return self.c_vjp_xk(self.h_grad(self.c_xk + self.c_jvp_xk(x - self.xk)))
 
     def gn_value_and_grad(self, x):
-        self.count["jvp"] += 1
-        self.count["vjp"] += 1
         u = x - self.xk
-        h_y, h_grad_y = self.h_value_and_grad(self.__c_xk + self.__c_jvp_xk(u))
-        return h_y, self.__c_vjp_xk(h_grad_y)
+        h_y, h_grad_y = self.h_value_and_grad(self.c_xk + self.c_jvp_xk(u))
+        return h_y, self.c_vjp_xk(h_grad_y)
+
+    # Gauss-Newton Hessian-vector product for ABO
+    def gn_hvp_abo(self, v):
+        self.count["h_hvp"] += 1
+        # return jax.jvp(self.__h_grad, (self.c_xk,), (v,))[1]
+        return self.c_vjp_xk(self.__hess_h_cxk(self.c_jvp_xk(v)))
 
 
 class OracleSub:
@@ -225,22 +243,10 @@ class BFGSB:
             return self.delta * v - self.A @ splin.lu_solve(self.lu_factor, self.A.T @ v)
 
 
-# r = 20
-# d = 3
-# A = np.random.randn(d, r)
-# A = A @ A.T
+# for Gauss-Newton model
+class GaussNewton:
+    def __init__(self, oracle: Oracle):
+        self.oracle = oracle
 
-# Bsp = spopt.BFGS()
-# Bsp.initialize(d, "hess")
-
-# B = BFGSB(d, memory=20)
-# for i in range(20):
-#     print(i)
-#     u = np.random.randn(d)
-#     B.update(u, A @ u)
-#     Bsp.update(u, A @ u)
-
-#     v = np.random.randn(d)
-#     print(B.dot(v))
-#     print(A @ v)
-#     print(Bsp.dot(v))
+    def dot(self, v: np.array):
+        return self.oracle.gn_hvp_abo(v)

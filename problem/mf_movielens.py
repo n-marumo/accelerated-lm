@@ -85,5 +85,6 @@ class Problem:
         else:
             return x
 
+    @functools.partial(jax.jit, static_argnums=(0,))
     def g(self, x):
         return 0
